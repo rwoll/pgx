@@ -5,20 +5,22 @@ import (
 	"sync"
 )
 
-func ConnConfigConnectFunc(cc ConnConfig) func() (*Conn, error) {
-	return func() (*Conn, error) { return Connect(cc) }
+func ConnConfigConnectFunc(cc ConnConfig) func() (Conn, error) {
+	return func() (Conn, error) { return Connect(cc) }
 }
 
 type ConnPoolConfig struct {
-	Connect        func() (*Conn, error)
+	Connect        func() (Conn, error)
 	MaxConnections int // max simultaneous connections to use, default 5, must be at least 2
+	Logger         Logger
+	LogLevel       int
 }
 
 type ConnPool struct {
-	allConnections       []*Conn
-	availableConnections []*Conn
+	allConnections       []Conn
+	availableConnections []Conn
 	cond                 *sync.Cond
-	connect              func() (*Conn, error)
+	connect              func() (Conn, error)
 	maxConnections       int
 	resetCount           int
 	logger               Logger
@@ -45,35 +47,34 @@ func NewConnPool(config ConnPoolConfig) (p *ConnPool, err error) {
 		return nil, errors.New("MaxConnections must be at least 1")
 	}
 
-	p.allConnections = make([]*Conn, 0, p.maxConnections)
-	p.availableConnections = make([]*Conn, 0, p.maxConnections)
+	p.allConnections = make([]Conn, 0, p.maxConnections)
+	p.availableConnections = make([]Conn, 0, p.maxConnections)
 	p.cond = sync.NewCond(new(sync.Mutex))
 
+	if config.LogLevel != 0 {
+		p.logLevel = config.LogLevel
+	} else {
+		// Preserve pre-LogLevel behavior by defaulting to LogLevelDebug
+		p.logLevel = LogLevelDebug
+	}
+	p.logger = config.Logger
+	if p.logger == nil {
+		p.logLevel = LogLevelNone
+	}
+
 	// Initially establish one connection
-	var c *Conn
-	c, err = p.connect()
+	c, err := p.connect()
 	if err != nil {
 		return
 	}
 	p.allConnections = append(p.allConnections, c)
 	p.availableConnections = append(p.availableConnections, c)
 
-	if c.logLevel != 0 {
-		p.logLevel = c.logLevel
-	} else {
-		// Preserve pre-LogLevel behavior by defaulting to LogLevelDebug
-		p.logLevel = LogLevelDebug
-	}
-	p.logger = c.logger
-	if p.logger == nil {
-		p.logLevel = LogLevelNone
-	}
-
 	return
 }
 
 // Acquire takes exclusive use of a connection until it is released.
-func (p *ConnPool) Acquire() (c *Conn, err error) {
+func (p *ConnPool) Acquire() (c Conn, err error) {
 	p.cond.L.Lock()
 	defer p.cond.L.Unlock()
 
@@ -84,7 +85,8 @@ func (p *ConnPool) Acquire() (c *Conn, err error) {
 	// A connection is available
 	if len(p.availableConnections) > 0 {
 		c = p.availableConnections[len(p.availableConnections)-1]
-		c.poolResetCount = p.resetCount
+		// TODO - support Reset
+		// c.poolResetCount = p.resetCount
 		p.availableConnections = p.availableConnections[:len(p.availableConnections)-1]
 		return
 	}
@@ -95,7 +97,8 @@ func (p *ConnPool) Acquire() (c *Conn, err error) {
 		if err != nil {
 			return
 		}
-		c.poolResetCount = p.resetCount
+		// TODO - support Reset
+		// c.poolResetCount = p.resetCount
 		p.allConnections = append(p.allConnections, c)
 		return
 	}
@@ -111,14 +114,15 @@ func (p *ConnPool) Acquire() (c *Conn, err error) {
 	}
 
 	c = p.availableConnections[len(p.availableConnections)-1]
-	c.poolResetCount = p.resetCount
+	// TODO - support Reset
+	// c.poolResetCount = p.resetCount
 	p.availableConnections = p.availableConnections[:len(p.availableConnections)-1]
 
 	return
 }
 
 // Release gives up use of a connection.
-func (p *ConnPool) Release(conn *Conn) {
+func (p *ConnPool) Release(conn Conn) {
 	if conn.TxStatus != 'I' {
 		conn.Exec("rollback")
 	}
@@ -188,8 +192,8 @@ func (p *ConnPool) Reset() {
 	defer p.cond.L.Unlock()
 
 	p.resetCount++
-	p.allConnections = make([]*Conn, 0, p.maxConnections)
-	p.availableConnections = make([]*Conn, 0, p.maxConnections)
+	p.allConnections = make([]Conn, 0, p.maxConnections)
+	p.availableConnections = make([]Conn, 0, p.maxConnections)
 }
 
 // Stat returns connection pool statistics
@@ -205,7 +209,7 @@ func (p *ConnPool) Stat() (s ConnPoolStat) {
 
 // Exec acquires a connection, delegates the call to that connection, and releases the connection
 func (p *ConnPool) Exec(sql string, arguments ...interface{}) (commandTag CommandTag, err error) {
-	var c *Conn
+	var c Conn
 	if c, err = p.Acquire(); err != nil {
 		return
 	}

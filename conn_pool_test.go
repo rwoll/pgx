@@ -57,8 +57,8 @@ func TestPoolAcquireAndReleaseCycle(t *testing.T) {
 	pool := createConnPool(t, maxConnections)
 	defer pool.Close()
 
-	acquireAll := func() (connections []*pgx.Conn) {
-		connections = make([]*pgx.Conn, maxConnections)
+	acquireAll := func() (connections []*pgx.TempNameConn) {
+		connections = make([]*pgx.TempNameConn, maxConnections)
 		for i := 0; i < maxConnections; i++ {
 			var err error
 			if connections[i], err = pool.Acquire(); err != nil {
@@ -217,7 +217,7 @@ func TestPoolReleaseDiscardsDeadConnections(t *testing.T) {
 			pool := createConnPool(t, maxConnections)
 			defer pool.Close()
 
-			var c1, c2 *pgx.Conn
+			var c1, c2 *pgx.TempNameConn
 			var err error
 			var stat pgx.ConnPoolStat
 
