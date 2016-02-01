@@ -50,7 +50,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jackc/pgx"
+	"github.com/segmentio/pgx"
 )
 
 var openFromConnPoolCount int
