@@ -20,6 +20,7 @@ import (
 	"time"
 )
 
+// DialFunc is a function that can be used to connect to a PostgreSQL server
 type DialFunc func(network, addr string) (net.Conn, error)
 
 // ConnConfig contains all the options used to establish a connection.
@@ -46,6 +47,7 @@ type Conn struct {
 	lastActivityTime   time.Time     // the last time the connection was used
 	reader             *bufio.Reader // buffered reader to improve read performance
 	wbuf               [1024]byte
+	writeBuf           WriteBuf
 	Pid                int32             // backend pid
 	SecretKey          int32             // key to use to send a cancel query message to the server
 	RuntimeParams      map[string]string // parameters that have been reported by the server
@@ -61,12 +63,14 @@ type Conn struct {
 	logLevel           int
 	mr                 msgReader
 	fp                 *fastpath
-	pgsql_af_inet      byte
-	pgsql_af_inet6     byte
+	pgsql_af_inet      *byte
+	pgsql_af_inet6     *byte
 	busy               bool
 	poolResetCount     int
+	preallocatedRows   []Rows
 }
 
+// PreparedStatement is a description of a prepared statement
 type PreparedStatement struct {
 	Name              string
 	SQL               string
@@ -74,17 +78,20 @@ type PreparedStatement struct {
 	ParameterOids     []Oid
 }
 
+// Notification is a message received from the PostgreSQL LISTEN/NOTIFY system
 type Notification struct {
 	Pid     int32  // backend pid that sent the notification
 	Channel string // channel from which notification was received
 	Payload string
 }
 
+// PgType is information about PostgreSQL type and how to encode and decode it
 type PgType struct {
 	Name          string // name of type e.g. int4, text, date
 	DefaultFormat int16  // default format (text or binary) this type will be requested in
 }
 
+// CommandTag is the result of an Exec function
 type CommandTag string
 
 // RowsAffected returns the number of rows affected. If the CommandTag was not
@@ -99,13 +106,27 @@ func (ct CommandTag) RowsAffected() int64 {
 	return n
 }
 
+// ErrNoRows occurs when rows are expected but none are returned.
 var ErrNoRows = errors.New("no rows in result set")
+
+// ErrNotificationTimeout occurs when WaitForNotification times out.
 var ErrNotificationTimeout = errors.New("notification timeout")
+
+// ErrDeadConn occurs on an attempt to use a dead connection
 var ErrDeadConn = errors.New("conn is dead")
+
+// ErrTLSRefused occurs when the connection attempt requires TLS and the
+// PostgreSQL server refuses to use TLS
 var ErrTLSRefused = errors.New("server refused TLS connection")
+
+// ErrConnBusy occurs when the connection is busy (for example, in the middle of
+// reading query results) and another action is attempts.
 var ErrConnBusy = errors.New("conn is busy")
+
+// ErrInvalidLogLevel occurs on attempt to set an invalid log level.
 var ErrInvalidLogLevel = errors.New("invalid log level")
 
+// ProtocolError occurs when unexpected data is received from PostgreSQL
 type ProtocolError string
 
 func (e ProtocolError) Error() string {
@@ -116,9 +137,29 @@ func (e ProtocolError) Error() string {
 // config.Host must be specified. config.User will default to the OS user name.
 // Other config fields are optional.
 func Connect(config ConnConfig) (c *Conn, err error) {
+	return connect(config, nil, nil, nil)
+}
+
+func connect(config ConnConfig, pgTypes map[Oid]PgType, pgsql_af_inet *byte, pgsql_af_inet6 *byte) (c *Conn, err error) {
 	c = new(Conn)
 
 	c.config = config
+
+	if pgTypes != nil {
+		c.PgTypes = make(map[Oid]PgType, len(pgTypes))
+		for k, v := range pgTypes {
+			c.PgTypes[k] = v
+		}
+	}
+
+	if pgsql_af_inet != nil {
+		c.pgsql_af_inet = new(byte)
+		*c.pgsql_af_inet = *pgsql_af_inet
+	}
+	if pgsql_af_inet6 != nil {
+		c.pgsql_af_inet6 = new(byte)
+		*c.pgsql_af_inet6 = *pgsql_af_inet6
+	}
 
 	if c.config.LogLevel != 0 {
 		c.logLevel = c.config.LogLevel
@@ -253,14 +294,18 @@ func (c *Conn) connect(config ConnConfig, network, address string, tlsConfig *tl
 				c.log(LogLevelInfo, "Connection established")
 			}
 
-			err = c.loadPgTypes()
-			if err != nil {
-				return err
+			if c.PgTypes == nil {
+				err = c.loadPgTypes()
+				if err != nil {
+					return err
+				}
 			}
 
-			err = c.loadInetConstants()
-			if err != nil {
-				return err
+			if c.pgsql_af_inet == nil || c.pgsql_af_inet6 == nil {
+				err = c.loadInetConstants()
+				if err != nil {
+					return err
+				}
 			}
 
 			return nil
@@ -273,7 +318,7 @@ func (c *Conn) connect(config ConnConfig, network, address string, tlsConfig *tl
 }
 
 func (c *Conn) loadPgTypes() error {
-	rows, err := c.Query("select t.oid, t.typname from pg_type t where t.typtype='b'")
+	rows, err := c.Query("select t.oid, t.typname from pg_type t left join pg_type base_type on t.typelem=base_type.oid where t.typtype='b' and (base_type.oid is null or base_type.typtype='b');")
 	if err != nil {
 		return err
 	}
@@ -306,8 +351,8 @@ func (c *Conn) loadInetConstants() error {
 		return err
 	}
 
-	c.pgsql_af_inet = ipv4[0]
-	c.pgsql_af_inet6 = ipv6[0]
+	c.pgsql_af_inet = &ipv4[0]
+	c.pgsql_af_inet6 = &ipv6[0]
 
 	return nil
 }
@@ -648,7 +693,7 @@ func (c *Conn) Deallocate(name string) (err error) {
 
 // Listen establishes a PostgreSQL listen/notify to channel
 func (c *Conn) Listen(channel string) error {
-	_, err := c.Exec("listen " + channel)
+	_, err := c.Exec("listen " + quoteIdentifier(channel))
 	if err != nil {
 		return err
 	}
@@ -660,7 +705,7 @@ func (c *Conn) Listen(channel string) error {
 
 // Unlisten unsubscribes from a listen channel
 func (c *Conn) Unlisten(channel string) error {
-	_, err := c.Exec("unlisten " + channel)
+	_, err := c.Exec("unlisten " + quoteIdentifier(channel))
 	if err != nil {
 		return err
 	}
@@ -781,9 +826,8 @@ func (c *Conn) CauseOfDeath() error {
 func (c *Conn) sendQuery(sql string, arguments ...interface{}) (err error) {
 	if ps, present := c.preparedStatements[sql]; present {
 		return c.sendPreparedQuery(ps, arguments...)
-	} else {
-		return c.sendSimpleQuery(sql, arguments...)
 	}
+	return c.sendSimpleQuery(sql, arguments...)
 }
 
 func (c *Conn) sendSimpleQuery(sql string, args ...interface{}) error {
@@ -828,7 +872,7 @@ func (c *Conn) sendPreparedQuery(ps *PreparedStatement, arguments ...interface{}
 			wbuf.WriteInt16(TextFormatCode)
 		default:
 			switch oid {
-			case BoolOid, ByteaOid, Int2Oid, Int4Oid, Int8Oid, Float4Oid, Float8Oid, TimestampTzOid, TimestampTzArrayOid, TimestampOid, TimestampArrayOid, DateOid, BoolArrayOid, Int2ArrayOid, Int4ArrayOid, Int8ArrayOid, Float4ArrayOid, Float8ArrayOid, TextArrayOid, VarcharArrayOid, OidOid, InetOid, CidrOid, InetArrayOid, CidrArrayOid:
+			case BoolOid, ByteaOid, Int2Oid, Int4Oid, Int8Oid, Float4Oid, Float8Oid, TimestampTzOid, TimestampTzArrayOid, TimestampOid, TimestampArrayOid, DateOid, BoolArrayOid, ByteaArrayOid, Int2ArrayOid, Int4ArrayOid, Int8ArrayOid, Float4ArrayOid, Float8ArrayOid, TextArrayOid, VarcharArrayOid, OidOid, InetOid, CidrOid, InetArrayOid, CidrArrayOid:
 				wbuf.WriteInt16(BinaryFormatCode)
 			default:
 				wbuf.WriteInt16(TextFormatCode)
@@ -1195,4 +1239,8 @@ func (c *Conn) SetLogLevel(lvl int) (int, error) {
 
 	c.logLevel = lvl
 	return lvl, nil
+}
+
+func quoteIdentifier(s string) string {
+	return `"` + strings.Replace(s, `"`, `""`, -1) + `"`
 }

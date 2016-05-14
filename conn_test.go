@@ -1185,6 +1185,22 @@ func TestListenNotifySelfNotification(t *testing.T) {
 	}
 }
 
+func TestListenUnlistenSpecialCharacters(t *testing.T) {
+	t.Parallel()
+
+	conn := mustConnect(t, *defaultConnConfig)
+	defer closeConn(t, conn)
+
+	chanName := "special characters !@#{$%^&*()}"
+	if err := conn.Listen(chanName); err != nil {
+		t.Fatalf("Unable to start listening: %v", err)
+	}
+
+	if err := conn.Unlisten(chanName); err != nil {
+		t.Fatalf("Unable to stop listening: %v", err)
+	}
+}
+
 func TestFatalRxError(t *testing.T) {
 	t.Parallel()
 
@@ -1198,8 +1214,10 @@ func TestFatalRxError(t *testing.T) {
 		var n int32
 		var s string
 		err := conn.QueryRow("select 1::int4, pg_sleep(10)::varchar").Scan(&n, &s)
-		if err, ok := err.(pgx.PgError); !ok || err.Severity != "FATAL" {
-			t.Fatalf("Expected QueryRow Scan to return fatal PgError, but instead received %v", err)
+		if err == pgx.ErrDeadConn {
+		} else if pgErr, ok := err.(pgx.PgError); ok && pgErr.Severity == "FATAL" {
+		} else {
+			t.Fatalf("Expected QueryRow Scan to return fatal PgError or ErrDeadConn, but instead received %v", err)
 		}
 	}()
 
