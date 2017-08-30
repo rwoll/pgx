@@ -58,7 +58,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/jackc/pgx"
+	"github.com/segmentio/pgx"
 )
 
 var (
