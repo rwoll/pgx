@@ -3,9 +3,9 @@ package pgx
 import (
 	"encoding/binary"
 
-	"github.com/jackc/pgx/pgio"
-	"github.com/jackc/pgx/pgproto3"
-	"github.com/jackc/pgx/pgtype"
+	"github.com/segmentio/pgx/pgio"
+	"github.com/segmentio/pgx/pgproto3"
+	"github.com/segmentio/pgx/pgtype"
 )
 
 func newFastpath(cn *Conn) *fastpath {

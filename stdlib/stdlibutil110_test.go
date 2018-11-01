@@ -6,8 +6,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/stdlib"
+	"github.com/segmentio/pgx"
+	"github.com/segmentio/pgx/stdlib"
 )
 
 func openDB(t *testing.T) *sql.DB {

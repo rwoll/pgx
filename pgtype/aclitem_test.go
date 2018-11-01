@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jackc/pgx/pgtype"
-	"github.com/jackc/pgx/pgtype/testutil"
+	"github.com/segmentio/pgx/pgtype"
+	"github.com/segmentio/pgx/pgtype/testutil"
 )
 
 func TestACLItemTranscode(t *testing.T) {
